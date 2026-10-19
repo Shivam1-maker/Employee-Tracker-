@@ -1,5 +1,4 @@
-# Employee-Tracker-
- Employee Login Location Tracking & Shift Monitoring
+# Employee Login Location Tracking & Shift Monitoring
 
 A web application that records every employee sign-in, works out where in India it came from
 (with the employee's consent), checks it against the employee's assigned shift, and gives
@@ -10,7 +9,47 @@ HTML/CSS/JS front end served by the same process.
 
 ---
 
-## What it does
+## 1. Quick start (local, SQLite)
+
+```bash
+python -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
+cp .env.example .env                 # then set ELT_SECRET_KEY
+python -m scripts.seed               # admin + 4 shifts + 8 offices + 24 employees + 14 days of demo sign-ins
+uvicorn app.main:app --reload
+```
+
+Open http://localhost:8001
+
+| Account | Employee ID | Password |
+|---|---|---|
+| Administrator | `ADM001` | `Admin@12345` |
+| Demo employees | `EMP1001` … `EMP1024` | `Welcome@123` |
+
+Change these immediately outside a test environment. For a clean production bootstrap:
+
+```bash
+python -m scripts.seed --reset --no-demo --admin-password 'a-long-unique-password'
+```
+
+Other seed options: `--employee-password 'Welcome@123'` (demo employees' password), `--days 14` (demo history length).
+
+**Upgrading from an earlier version:** just restart the server. New tables and columns are added
+automatically on start-up and existing records are kept. Run `python -m scripts.seed --reset` only
+if you want fresh demo data (it deletes everything).
+
+Interactive API docs: http://localhost:8001/docs (OpenAPI JSON is also saved in `docs/openapi.json`).
+
+Run the test suite:
+
+```bash
+pytest -q        # 79 tests: shift rules, geolocation, auth, RBAC, reports, attendance, leave, alerts, import, notifications, security
+```
+
+---
+
+## 2. What it does
 
 **Sign-in page** (`/static/login.html`) shows the current IST time, explains what is recorded,
 and offers an opt-in checkbox to share device location for that sign-in.
@@ -50,7 +89,7 @@ and offers an opt-in checkbox to share device location for that sign-in.
 
 ---
 
-## How location is determined
+## 3. How location is determined
 
 Signals are checked in this order. Location is captured **only at the moment of sign-in**; there is
 no background or continuous tracking.
@@ -73,7 +112,7 @@ located sign-in), `not_assigned_office`, `suspicious_accuracy` (GPS reports 0 m)
 
 ---
 
-## How shift compliance is calculated
+## 4. How shift compliance is calculated
 
 All times are evaluated in `Asia/Kolkata` and stored in UTC.
 
@@ -102,7 +141,7 @@ Monday's night shift and reported as 150 minutes late.
 
 ---
 
-## Project structure
+## 5. Project structure
 
 ```
 app/
@@ -134,7 +173,55 @@ tests/                  pytest suite
 docs/API.md             Endpoint reference
 docs/openapi.json       Generated OpenAPI schema
 ```
-## Security measures
+
+---
+
+## 6. Deployment
+
+### Docker Compose (PostgreSQL)
+
+```bash
+export ELT_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(64))')"
+docker compose up -d --build
+docker compose exec app python -m scripts.seed --no-demo --admin-password 'a-long-unique-password'
+```
+
+Tables, and new columns from later versions, are created automatically on start-up. For more
+complex schema changes in production, add Alembic
+migrations (`alembic init`, point `target_metadata` at `app.database.Base.metadata`).
+
+### Behind a reverse proxy (required for real use)
+
+Browsers only allow the Geolocation API on **HTTPS** (localhost is exempt). Put nginx, Caddy or a
+cloud load balancer in front with TLS, then set `ELT_TRUST_PROXY_HEADERS=true` so the real client
+IP is used for office-network checks and rate limiting. Never enable that setting when the app is
+directly exposed, or clients can spoof their IP.
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name attendance.example.com;
+    ssl_certificate     /etc/letsencrypt/live/attendance.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/attendance.example.com/privkey.pem;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+### Scaling notes
+- The login rate limiter is in-process. With multiple workers or instances, each keeps its own
+  counter; move it to Redis for a strict global limit. Account lockout is stored in the database
+  and is already global.
+- Schedule `POST /api/admin/retention/purge` (or a cron job) to enforce your retention period.
+
+---
+
+## 7. Security measures
 
 - bcrypt password hashing (cost 12); minimum 10-character passwords for new accounts.
 - Signed JWT access tokens (HS256) with expiry; role-based access (admin vs employee).
@@ -157,7 +244,7 @@ verification, the impossible-travel flag, and (if needed) a managed-device MDM a
 
 ---
 
-## Privacy and legal (India)
+## 8. Privacy and legal (India)
 
 Location and attendance data are personal data under the **Digital Personal Data Protection Act,
 2023**. The app is designed to support compliance, but your organisation is responsible for how
@@ -173,7 +260,30 @@ it is used. Before go-live:
 - Check your HR policy, employment contracts and any state-specific rules with your legal team.
 
 ---
-## Sign-in notifications (email and SMS)
+
+## 9. Configuration reference
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ELT_SECRET_KEY` | *(placeholder)* | JWT signing key. **Must** be set. |
+| `ELT_DATABASE_URL` | `sqlite:///./elt.db` | SQLAlchemy URL; use `postgresql+psycopg://…` in production |
+| `ELT_ACCESS_TOKEN_MINUTES` | `60` | Session length |
+| `ELT_MAX_FAILED_LOGINS` / `ELT_LOCKOUT_MINUTES` | `5` / `15` | Lockout policy |
+| `ELT_LOGIN_RATE_LIMIT_PER_MINUTE` | `20` | Per-IP sign-in attempts |
+| `ELT_TIMEZONE` | `Asia/Kolkata` | Shift evaluation and display timezone |
+| `ELT_NEAREST_CITY_MAX_KM` | `60` | Max distance to name a nearest city |
+| `ELT_POOR_GPS_ACCURACY_M` | `1500` | Accuracy above this is "approximate" |
+| `ELT_IMPOSSIBLE_TRAVEL_KMH` | `900` | Speed threshold for the travel flag |
+| `ELT_RETENTION_DAYS` | `365` | Default purge age |
+| `ELT_OVERTIME_THRESHOLD_MINUTES` | `30` | Minutes past shift end before a check-out counts as overtime |
+| `ELT_MAX_SESSION_HOURS` | `20` | Oldest sign-in that can still be checked out |
+| `ELT_TRUST_PROXY_HEADERS` | `false` | Use `X-Forwarded-For` (only behind your proxy) |
+| `ELT_IP_GEO_PROVIDER` | `none` | `ipapi` enables coarse third-party IP lookup |
+| `ELT_CORS_ORIGINS` | *(empty)* | Comma-separated origins if the UI is hosted elsewhere |
+
+---
+
+## 10. Sign-in notifications (email and SMS)
 
 Each successful sign-in sends:
 - **the employee** a receipt with time (IST), city/state, office, how the location was checked,

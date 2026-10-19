@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: elt
+      POSTGRES_USER: elt
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-elt_password}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U elt -d elt"]
+      interval: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      ELT_DATABASE_URL: postgresql+psycopg://elt:${POSTGRES_PASSWORD:-elt_password}@db:5432/elt
+      ELT_SECRET_KEY: ${ELT_SECRET_KEY:?Set ELT_SECRET_KEY in your shell or .env}
+      ELT_TRUST_PROXY_HEADERS: "false"
+    ports: ["8000:8000"]
+
+volumes:
+  pgdata:
